@@ -19,6 +19,7 @@ Usage:
 import argparse
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -30,12 +31,11 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from dotenv import load_dotenv
 load_dotenv()
 
-# ---- Key rotation for multi-key ingestion (ONLY INGESTION_KEY_1 through 4) ----
+# ---- Key rotation for multi-key ingestion (ONLY INGESTION_KEY_N) ----
 # STRICT RULE: main GEMINI_API_KEY is NEVER used
 INGESTION_KEYS = []
 
-# Add INGESTION_KEY_1 through INGESTION_KEY_4 only (skip 5, skip main key)
-for i in range(1, 5):
+for i in range(1, 9):
     key = os.getenv(f"INGESTION_KEY_{i}", "").strip()
     if key:
         INGESTION_KEYS.append((f"INGESTION_KEY_{i}", key))
@@ -60,6 +60,27 @@ def next_key():
     print(f"[KEY ROTATION] Switched to {key_name} ({_current_key_index}/{len(INGESTION_KEYS)} keys)")
     return key_value
 
+
+def advance_key(quiet: bool = False):
+    """Move to the next key with modulo wraparound and reconfigure. Unlike
+    next_key() this never 'runs out' — it cycles, so callers that count keys
+    tried per sweep can implement a wait-and-retry when the whole set is 429
+    (per-minute RPM saturation, common when several ingest processes share the
+    same 8 keys). Returns the new key value.
+
+    `quiet` suppresses the log line: we now rotate on *every* embed call to
+    spread load across all 8 keys (so each key sees only 1/8th of the RPM/TPM
+    and the between-call sleep can be tiny), and logging every rotation would
+    bury the actual per-page progress."""
+    global _current_key_index
+    _current_key_index = (_current_key_index + 1) % len(INGESTION_KEYS)
+    key_name, key_value = INGESTION_KEYS[_current_key_index]
+    import google.generativeai as genai
+    genai.configure(api_key=key_value)
+    if not quiet:
+        print(f"[KEY ROTATION] -> {key_name} ({_current_key_index + 1}/{len(INGESTION_KEYS)})")
+    return key_value
+
 TARGET_CHUNK = 1500   # chars; masail are packed up to this size
 MAX_CHUNK = 3000      # a single masla longer than this is split at sentence ends
 OVERLAP = 200         # overlap when force-splitting oversized text
@@ -67,7 +88,14 @@ OVERLAP = 200         # overlap when force-splitting oversized text
 # (~2 chars/token), so cap each API call by characters and pace the calls —
 # a 70k-char batch 429s permanently no matter how long we retry.
 MAX_BATCH_CHARS = int(os.getenv("INGEST_BATCH_CHARS", "20000"))
-BATCH_SLEEP = float(os.getenv("INGEST_BATCH_SLEEP", "25"))  # seconds between calls (stay under TPM)
+# We rotate to a fresh key before every embed call (see the batch loop), so any
+# single key is hit only once per 8 calls — its per-minute RPM/TPM window barely
+# fills. That lets the between-call pace drop from 25s to a few seconds. If a
+# second ingest process is sharing the same 8 keys, raise this via the env.
+BATCH_SLEEP = float(os.getenv("INGEST_BATCH_SLEEP", "4"))  # seconds between calls (per-key load is 1/8th)
+# Rounds of (try all keys + wait 60s) before giving up on a batch when every key
+# is 429. Rides out per-minute saturation from parallel ingest processes.
+MAX_QUOTA_SWEEPS = int(os.getenv("INGEST_QUOTA_SWEEPS", "20"))
 
 URDU_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
 MASLA_RE = re.compile(r"مسئلہ\s*[\(（]?\s*([۰-۹]+)\s*[\)）]?\s*[:：]?")
@@ -222,11 +250,13 @@ def main():
     db.init_db()
     rag.init_rag()
 
-    # Initialize with first key (main GEMINI_API_KEY or first ingestion key)
+    # Start at a RANDOM key so several ingest processes sharing these 8 keys
+    # don't all hammer key 1 first (thundering herd -> needless 429s).
     if INGESTION_KEYS:
-        key_name, key_value = INGESTION_KEYS[0]
+        _current_key_index = random.randrange(len(INGESTION_KEYS))
+        key_name, key_value = INGESTION_KEYS[_current_key_index]
         genai.configure(api_key=key_value)
-        print(f"[KEY ROTATION] Starting with {key_name} (1/{len(INGESTION_KEYS)} keys)")
+        print(f"[KEY ROTATION] Starting with {key_name} ({_current_key_index + 1}/{len(INGESTION_KEYS)} keys)")
 
     ckpt_path = pages_dir / "ingest_checkpoint.json"
     done = json.loads(ckpt_path.read_text(encoding="utf-8")) if ckpt_path.exists() else {}
@@ -242,11 +272,25 @@ def main():
         # Re-running a page after a crash: clear its rows first (no duplicates).
         # The jild tag is essential: page file names repeat across jilds, and
         # without it ingesting Jild 2's page_001 deletes Jild 1's page_001 rows.
-        with db.get_cursor(commit=True) as cur:
-            cur.execute(
-                "DELETE FROM sources WHERE %s = ANY(tags) AND %s = ANY(tags) AND %s = ANY(tags);",
-                (book_tag, f"jild-{args.jild}", page_name),
-            )
+        # Neon closes idle connections during the 25s batch sleeps, and a
+        # server-side drop isn't visible to the pool's conn.closed check —
+        # retry like the inserts do, discarding the dead handle each time.
+        for db_attempt in range(12):
+            try:
+                with db.get_cursor(commit=True) as cur:
+                    cur.execute(
+                        "DELETE FROM sources WHERE %s = ANY(tags) AND %s = ANY(tags) AND %s = ANY(tags);",
+                        (book_tag, f"jild-{args.jild}", page_name),
+                    )
+                break
+            except Exception as exc:
+                # 12 x 20s = 4 min of tolerance — Neon DNS blips have been
+                # observed lasting 100s+, right at the edge of the old 6x20s budget.
+                print(f"  page delete failed ({exc}); retry in 20s")
+                time.sleep(20)
+        else:
+            print(f"Stopped at {page_name} (db). Re-run later to resume.")
+            sys.exit(1)
         batches, cur_batch, cur_chars = [], [], 0
         for c in page_chunks:
             if cur_batch and cur_chars + len(c["content"]) > MAX_BATCH_CHARS:
@@ -258,32 +302,48 @@ def main():
             batches.append(cur_batch)
 
         for batch in batches:
-            for attempt in range(5):
+            vecs = None
+            sweeps = 0            # rounds where the whole key set was 429
+            tried_this_sweep = 0  # distinct keys tried since last success/wait
+            while vecs is None:
                 try:
+                    # Rotate to the next key before every call so load is spread
+                    # evenly across all 8 keys (each sees ~1/8th the RPM/TPM).
+                    advance_key(quiet=True)
                     vecs = rag.embed_batch([c["content"] for c in batch])
                     break
                 except Exception as exc:
                     exc_str = str(exc)
-                    # Check if 429 quota error — try next key instead of waiting
-                    if "429" in exc_str or "You exceeded your current quota" in exc_str:
-                        new_key = next_key()
-                        if not new_key:
-                            print(f"Stopped at {page_name} (all keys exhausted). Re-run later to resume.")
-                            return
-                        print(f"  {exc_str[:80]}... Trying next key.")
-                        time.sleep(2)  # brief pause before retry with new key
+                    is_quota = "429" in exc_str or "You exceeded your current quota" in exc_str
+                    if is_quota:
+                        tried_this_sweep += 1
+                        # When every key has 429'd within one sweep, the whole
+                        # set is rate-limited right now (per-minute saturation
+                        # from parallel ingest jobs) — wait for the window to
+                        # reset instead of bailing.
+                        if tried_this_sweep >= len(INGESTION_KEYS):
+                            sweeps += 1
+                            tried_this_sweep = 0
+                            if sweeps > MAX_QUOTA_SWEEPS:
+                                print(f"Stopped at {page_name} (quota, {sweeps} sweeps). Re-run later to resume.")
+                                sys.exit(1)
+                            print(f"  all {len(INGESTION_KEYS)} keys 429 (sweep {sweeps}/{MAX_QUOTA_SWEEPS}); waiting 60s for reset")
+                            time.sleep(60)
+                        advance_key()
+                        time.sleep(2)
                         continue
-                    # Non-quota error: exponential backoff
-                    wait = 30 * (attempt + 1)
+                    # Non-quota error: bounded exponential backoff.
+                    sweeps += 1
+                    if sweeps > MAX_QUOTA_SWEEPS:
+                        print(f"Stopped at {page_name} (embed error persists). Re-run later to resume.")
+                        sys.exit(1)
+                    wait = min(30 * sweeps, 120)
                     print(f"  embed failed ({exc}); retry in {wait}s")
                     time.sleep(wait)
-            else:
-                print(f"Stopped at {page_name} (quota?). Re-run later to resume.")
-                return
             for c, v in zip(batch, vecs):
                 # The dead pooled handle is discarded on the next borrow, so a
                 # retry after a dropped Neon connection gets a fresh one.
-                for db_attempt in range(3):
+                for db_attempt in range(12):
                     try:
                         rag.add_source_with_vector(
                             title=c["title"], content=c["content"], vec=v,
@@ -291,11 +351,11 @@ def main():
                         )
                         break
                     except Exception as exc:
-                        print(f"  db insert failed ({exc}); retry in 10s")
-                        time.sleep(10)
+                        print(f"  db insert failed ({exc}); retry in 20s")
+                        time.sleep(20)
                 else:
                     print(f"Stopped at {page_name} (db). Re-run later to resume.")
-                    return
+                    sys.exit(1)
             time.sleep(BATCH_SLEEP)
         done[page_name] = len(page_chunks)
         ckpt_path.write_text(json.dumps(done, ensure_ascii=False, indent=1), encoding="utf-8")

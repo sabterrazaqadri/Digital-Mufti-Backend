@@ -288,6 +288,26 @@ def _encode_sources(passages) -> str:
     return base64.b64encode(payload.encode("utf-8")).decode("ascii")
 
 
+# Markers of a reply that carries NO ruling — the "no mustanad reference" refusal or
+# the "I only cover Islamic matters" out-of-scope reply. When the answer is one of
+# these, any retrieved passages that happened to clear the threshold must NOT be shown
+# or persisted as its "sources": citations under a refusal are self-contradictory.
+_REFUSAL_MARKERS = (
+    "مستند حوالہ نہیں",          # Urdu: no authentic reference
+    "mustanad hawala nahi",       # Roman Urdu
+    "authentic reference on this matter",  # English
+    "صرف اسلامی مسائل",          # Urdu: only Islamic matters
+    "sirf islami masail",         # Roman Urdu
+    "only have knowledge about islamic matters",  # English
+    "only cover islamic matters",
+)
+
+
+def _is_refusal_answer(text: str) -> bool:
+    low = (text or "").lower()
+    return any(m.lower() in low for m in _REFUSAL_MARKERS)
+
+
 # Short follow-ups / meta-instructions that mean "act on the previous answer", not a
 # new topic — retrieving sources for these pulls in irrelevant context.
 _META_FOLLOWUPS = {
@@ -416,6 +436,12 @@ CATEGORIES = [
         "desc": "The life of the Prophet ﷺ, the anbiya, and the scholars who followed.",
     },
     {
+        "slug": "naat-o-manqabat",
+        "name": "Naat & Manqabat",
+        "urdu": "نعت و منقبت",
+        "desc": "Praise of the Prophet ﷺ and the awliya in verse.",
+    },
+    {
         "slug": "tasawwuf-o-akhlaq",
         "name": "Tasawwuf & Akhlaq",
         "urdu": "تصوف و اخلاق",
@@ -440,11 +466,15 @@ DEFAULT_CATEGORY = "mutafarriq"
 BOOK_CATEGORIES = {
     "al-quran-ul-kareem": "quran-o-tafseer",
     "sirat-ul-jinan": "quran-o-tafseer",
+    "surah-e-fatiha-ki-tafseer": "quran-o-tafseer",
+    "ilm-ul-quran": "quran-o-tafseer",
 
     "miraat-ul-manajeeh": "hadees",
     "anwaar-ul-hadees": "hadees",
     "kalam-e-raza-me-ahadees-ke-jalwe": "hadees",
     "nisab-e-usool-e-hadees-ma-ifadaat-e-razawiya": "hadees",
+    "hashia-bukhari": "hadees",
+    "sharah-hadees-qustuntunia": "hadees",
 
     "bahar-e-shariat": "fiqh-o-fatawa",
     "fatawa-razawiyya": "fiqh-o-fatawa",
@@ -452,17 +482,76 @@ BOOK_CATEGORIES = {
     "khulasa-tul-faraiz": "fiqh-o-fatawa",
     "aala-hazrat-say-sawal-jawab": "fiqh-o-fatawa",
     "talkhees-usool-ul-shashi": "fiqh-o-fatawa",
+    "fatawa-africa": "fiqh-o-fatawa",
+    "khawateen-kay-masail": "fiqh-o-fatawa",
+    "hajj-o-umrah-ka-tareeqa-wa-masaail": "fiqh-o-fatawa",
+    "rozoun-kay-masail": "fiqh-o-fatawa",
+    "halal-aur-haram-janwar": "fiqh-o-fatawa",
+    "talaq-e-salasa": "fiqh-o-fatawa",
+    "zakat-ki-ahmiat": "fiqh-o-fatawa",
+    "tehqeeq-e-rakat-e-taraweeh": "fiqh-o-fatawa",
+    "rasool-e-khuda-ki-namaz-detailed": "fiqh-o-fatawa",
+    "shadi-ka-anmol-tohfa": "fiqh-o-fatawa",
+    "shaadi-par-mubarakbadi": "fiqh-o-fatawa",
+    "tasbeehat-e-ramazan": "fiqh-o-fatawa",
+    "tareef-per-inam": "fiqh-o-fatawa",
 
     "ja-al-haq": "aqaid",
     "al-haqq-ul-mubeen": "aqaid",
     "kitab-ul-aqiad": "aqaid",
     "aqaid-e-nasafi": "aqaid",
+    "shirk-kya-he-bidat-kia-hay": "aqaid",
+    "bidat-e-sahaba": "aqaid",
+    "fitna-e-qadiyaniat": "aqaid",
+    "shiya-ka-aqeeda-e-imamat": "aqaid",
+    "karamat-o-wasilay-ka-saboot": "aqaid",
+    "mazratat-e-aulia-aur-tawasul": "aqaid",
+    "khazanae-khuda-ki-chabiyan-habibe-khuda-ke-hath-me": "aqaid",
+    "fuzlat-e-rasool-pak-hain": "aqaid",
+    "shumool-ul-islam": "aqaid",
+    "tableegi-jamat": "aqaid",
 
     "seerat-e-rasool-e-arabi": "seerat-o-sawaneh",
     "seerat-ul-anbiya": "seerat-o-sawaneh",
     "faizan-e-mufti-azam-hind": "seerat-o-sawaneh",
+    "seerat-e-mustafa": "seerat-o-sawaneh",
+    "mukhtasar-seerat-e-rasool": "seerat-o-sawaneh",
+    "hijrat-e-rasool": "seerat-o-sawaneh",
+    "khasais-e-mustafa": "seerat-o-sawaneh",
+    "jami-us-sifat-nabi": "seerat-o-sawaneh",
+    "shumaile-nabvi": "seerat-o-sawaneh",
+    "zulf-ambareen": "seerat-o-sawaneh",
+    "tameer-e-kaaba": "seerat-o-sawaneh",
+    "ziarate-gumbade-khizra": "seerat-o-sawaneh",
+    "huzur-alehe-salam-kay-maa-baap-momin-thay": "seerat-o-sawaneh",
+    "hind-o-pak-nigahe-nubuwat-mein": "seerat-o-sawaneh",
+    "imam-e-azam": "seerat-o-sawaneh",
+    "sawaneh-e-ghaus-e-azam": "seerat-o-sawaneh",
+    "malfoozat-e-alahazrat": "seerat-o-sawaneh",
+    "shahadat-e-imam-e-hussain": "seerat-o-sawaneh",
+    "hazrat-usman-jamiul-quran": "seerat-o-sawaneh",
+    "fazail-e-fatima-zohra": "seerat-o-sawaneh",
+    "fazail-e-syedna-siddiq-e-akbar": "seerat-o-sawaneh",
+    "yazeed-kay-ghazi": "seerat-o-sawaneh",
+    "yazeedi-lashkarion-ka-anjame-bad": "seerat-o-sawaneh",
+
+    "hadaiq-e-bakhshish": "naat-o-manqabat",
+    "zoq-e-naat": "naat-o-manqabat",
+    "saman-e-bakhshish": "naat-o-manqabat",
+    "wasail-e-bakhshish": "naat-o-manqabat",
+    "qabala-e-bakhshish": "naat-o-manqabat",
+    "naghmat-e-akhtar": "naat-o-manqabat",
+    "riaz-e-naeem": "naat-o-manqabat",
+    "dewan-e-salik": "naat-o-manqabat",
+    "bayaz-e-paak-hujjat-ul-islam": "naat-o-manqabat",
+    "qaseeda-burda-sharif": "naat-o-manqabat",
+    "naat-khawani-kay-faiday": "naat-o-manqabat",
 
     "ihya-ul-uloom-mutarjam": "tasawwuf-o-akhlaq",
+    "siraat-ul-abrar": "tasawwuf-o-akhlaq",
+    "shariat-o-tareeqat": "tasawwuf-o-akhlaq",
+    "khutbaat-e-razavia": "tasawwuf-o-akhlaq",
+    "valentine-day-kia-hay": "tasawwuf-o-akhlaq",
 
     "nisab-ul-nahw": "darsi-kutub",
     "nisab-us-sarf": "darsi-kutub",
@@ -870,7 +959,7 @@ async def publish_answer(request: Request, body: PublishRequest):
     if not body.sources:
         raise HTTPException(status_code=400, detail="Only sourced answers can be published")
     # The refusal wording must never be published, even if citations rode along.
-    if "مستند حوالہ نہیں" in body.answer or "mustanad hawala nahi" in body.answer.lower():
+    if _is_refusal_answer(body.answer):
         raise HTTPException(status_code=400, detail="Refusals cannot be published")
 
     try:
@@ -1158,8 +1247,13 @@ def _stream_text(user_text: str, grounded_text: str, history, persist=None, sour
     if persist and full:
         try:
             chat_id, user_id = persist
+            # A refusal / out-of-scope reply carries no ruling, so it must not be
+            # stored with citations — otherwise reopening the chat shows sources under
+            # a "koi mustanad hawala nahi" answer (the live panel is cleared the same
+            # way on the client).
+            persist_sources = None if _is_refusal_answer(full) else sources
             db.MessageRepository.create_message(
-                chat_id, user_id, "assistant", full, sources=sources
+                chat_id, user_id, "assistant", full, sources=persist_sources
             )
         except Exception as exc:
             print(f"Persist assistant message failed: {exc}")
@@ -1193,15 +1287,26 @@ async def chat(
     # derail the answer onto an unrelated subject.
     retrieval_attempted = _should_retrieve(user_input)
     passages = []
+    grounded_input = None
     if retrieval_attempted:
-        # Topic-less requests ("hadees sunao") have nothing to match on, so they
-        # never clear the similarity threshold — draw a random passage instead.
-        intent = rag.browse_intent(user_input)
-        if intent:
-            passages = await run_in_threadpool(rag.browse, intent[0], intent[1])
-        if not passages:
-            passages = await run_in_threadpool(rag.retrieve, user_input)
-    grounded_input = rag.build_grounded_input(user_input, passages, retrieval_attempted)
+        # A "recite a she'r/kalam" request needs EXACT-line lookup, not vector
+        # similarity (which would hand back a different couplet). Route it first.
+        verse_frag = rag.verse_request(user_input)
+        if verse_frag is not None:
+            passages, verse_mode = await run_in_threadpool(
+                rag.verse_lookup, user_input, verse_frag
+            )
+            grounded_input = rag.build_verse_input(user_input, verse_frag, passages, verse_mode)
+        else:
+            # Topic-less requests ("hadees sunao") have nothing to match on, so they
+            # never clear the similarity threshold — draw a random passage instead.
+            intent = rag.browse_intent(user_input)
+            if intent:
+                passages = await run_in_threadpool(rag.browse, intent[0], intent[1])
+            if not passages:
+                passages = await run_in_threadpool(rag.retrieve, user_input)
+    if grounded_input is None:
+        grounded_input = rag.build_grounded_input(user_input, passages, retrieval_attempted)
 
     # Force a Roman-Urdu reply when the user wrote Roman Urdu (the model sees this
     # directive but it is NOT persisted as the user's message).

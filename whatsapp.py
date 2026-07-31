@@ -86,14 +86,20 @@ def _answer(text: str) -> str:
 
     retrieval_attempted = app_main._should_retrieve(text)
     passages = []
+    grounded = None
     if retrieval_attempted:
-        intent = rag.browse_intent(text)
-        if intent:
-            passages = rag.browse(intent[0], intent[1])
-        if not passages:
-            passages = rag.retrieve(text)
-
-    grounded = rag.build_grounded_input(text, passages, retrieval_attempted)
+        verse_frag = rag.verse_request(text)
+        if verse_frag is not None:
+            passages, verse_mode = rag.verse_lookup(text, verse_frag)
+            grounded = rag.build_verse_input(text, verse_frag, passages, verse_mode)
+        else:
+            intent = rag.browse_intent(text)
+            if intent:
+                passages = rag.browse(intent[0], intent[1])
+            if not passages:
+                passages = rag.retrieve(text)
+    if grounded is None:
+        grounded = rag.build_grounded_input(text, passages, retrieval_attempted)
     directive = app_main._language_directive(text)
 
     source = app_main._groq_chunks if app_main.LLM_PROVIDER == "groq" else app_main._gemini_chunks

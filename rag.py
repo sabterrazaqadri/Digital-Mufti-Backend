@@ -49,9 +49,18 @@ _GROUNDING_PREFIX = (
     "- Excerpts are retrieved by similarity, so a NON-Islamic question (space, sports, "
     "trivia) can still pull some in. If the question is not an Islamic matter, ignore them "
     "and give the out-of-scope reply instead — never stretch an excerpt to fit.\n"
-    "- If the excerpts only PARTLY cover the question, answer the covered part from them and, "
-    "for the uncovered part, plainly say you have no mustanad reference for it right now — "
-    "do NOT fill the gap from memory and do NOT invent a citation.\n\n"
+    "- These excerpts are retrieved by SIMILARITY, so some may be about a DIFFERENT, "
+    "similar-looking mas'ala than the one asked. Before relying on an excerpt, check it "
+    "actually governs THIS exact case — same act, same condition, same ruling. A passage about "
+    "a look-alike scenario (e.g. tayammum-then-found-water, or a forgotten-najasat case) is NOT "
+    "a basis for a different scenario (e.g. prayed without the obligatory ghusl); do NOT "
+    "generalise one masla's relief-ruling onto another.\n"
+    "- Answer ONLY the part of the question that an excerpt genuinely and squarely establishes, "
+    "citing its reference line exactly. For any part not squarely covered — including when the "
+    "excerpts are only topically near but do not state the ruling for THIS case — plainly say "
+    "you have no mustanad reference for it right now. Do NOT fill the gap from memory, do NOT "
+    "invent a citation, and NEVER state a ruling the excerpts do not actually support. When in "
+    "doubt about whether an excerpt fits, treat it as not covering the question.\n\n"
     "Background excerpts:\n"
 )
 
@@ -210,12 +219,20 @@ def add_source_with_vector(
 
 
 def embed_batch(texts: List[str], task_type: str = "retrieval_document") -> List[List[float]]:
-    """Embed many texts in one API request (Gemini batches lists natively)."""
+    """Embed many texts in one API request (Gemini batches lists natively).
+
+    A request timeout is essential for long ingestions: without it a dropped/
+    half-open connection can leave genai.embed_content blocked forever (observed
+    on Fatawa jild 27 — the driver silently froze ~1.5h at one page, producing no
+    log line, so even the Monitor couldn't see it). With a timeout the stuck call
+    raises instead, and ingest_book.py's per-call retry loop rotates the key and
+    retries — a hang self-heals like a normal transient error."""
     res = genai.embed_content(
         model=EMBED_MODEL,
         content=texts,
         task_type=task_type,
         output_dimensionality=EMBED_DIM,
+        request_options={"timeout": float(os.getenv("EMBED_TIMEOUT", "60"))},
     )
     return res["embedding"]
 
@@ -425,6 +442,165 @@ def browse(tags, needle: Optional[str], k: int = 3) -> List[Dict[str, Any]]:
     except Exception as exc:
         print(f"RAG browse failed: {exc}")
         return []
+
+
+# ---------------------------------------------------------------------------
+# Verse / she'r recitation ("Qasida-e-Noor se '<line>' wala shair sunao")
+# ---------------------------------------------------------------------------
+# Vector search finds THEMATICALLY similar couplets, not the EXACT line a user
+# quotes — so "recite the noor-o-bint-e-noor she'r" would return a different real
+# verse from the same qasida (a wrong substitution) or let the model recite from
+# memory. For a quoted line we instead do an EXACT lexical lookup (diacritic-
+# insensitive) over the poetry books, and if it isn't found we say so rather than
+# hand back a different verse.
+_POETRY_TAGS = (
+    "hadaiq-e-bakhshish", "zoq-e-naat", "saman-e-bakhshish", "qabala-e-bakhshish",
+    "wasail-e-bakhshish", "riaz-e-naeem", "dewan-e-salik", "bayaz-e-paak-hujjat-ul-islam",
+    "qaseeda-burda-sharif", "kalam-e-raza-me-ahadees-ke-jalwe", "naghmat-e-akhtar",
+)
+# Urdu/Arabic combining marks + ZWNJ/ZWJ: strip so "بنتِ" matches "بنت", "نُور" ↔ "نور".
+_HARAKAT = "[ً-ٰٟـ‌‍]"
+_STRIP_SQL = f"regexp_replace(content, '{_HARAKAT}', '', 'g')"
+_HARAKAT_RE = re.compile(_HARAKAT)
+
+_VERSE_NOUN_RE = re.compile(
+    r"(sher|shair|she'?r|ashaar|ash'?aar|abyat|abiyat|kalaam|kalam|misra|misre|"
+    r"bait|be?yt|naat|na'?at|manqabat|qasida|qaseeda|"
+    r"شعر|اشعار|ابیات|کلام|مصرع|بیت|نعت|منقبت|قصیدہ)", re.I)
+_RECITE_VERB_RE = re.compile(
+    r"(suna|sunao|sunaao|sunaye|sunaiye|batao|bataao|bataye|parhao|padhao|likho|"
+    r"share|recite|سناؤ|سنائیں|سنائیے|سنا\s*د|بتاؤ|پڑھو|لکھو|لکھ)", re.I)
+
+
+def verse_request(query: str) -> Optional[str]:
+    """Is this a 'recite a she'r/kalam' request? Returns the specific quoted line
+    to look up ("" if the user quoted nothing specific), or None if it is not a
+    verse-recitation request at all (so fiqh questions that merely mention 'naat'
+    are never hijacked — both a verse-noun AND a recite-verb must be present)."""
+    q = query.strip()
+    if not (_VERSE_NOUN_RE.search(q) and _RECITE_VERB_RE.search(q)):
+        return None
+    return _extract_quoted_line(q)
+
+
+def _extract_quoted_line(q: str) -> str:
+    """Pull the specific line the user is quoting, else '' (a generic request)."""
+    m = re.search(r"[\"“”'‘’](.+?)[\"“”'‘’]", q)          # explicit quotes
+    if m and len(m.group(1).strip()) >= 3:
+        return m.group(1).strip()
+    # "<line> wala/wali sher"  /  "<line> والا شعر"
+    m = re.search(r"(.+?)\s+(wala|wali|waala|والا|والی)\b", q, re.I)
+    if m:
+        cand = m.group(1)
+        # drop everything up to the last "se/me/mein/میں/سے" boilerplate lead-in
+        cand = re.split(r"\b(se|sey|me|mein|میں|سے)\b", cand, flags=re.I)[-1]
+        cand = re.sub(r"\b(koi|kuch|ek|aik|aur|please|pls|zara|zra)\b", " ", cand, flags=re.I)
+        if len(cand.strip()) >= 3:
+            return cand.strip()
+    # "jis me/jisme <line>"
+    m = re.search(r"jis\s*me[ne]?\s+(.+)$", q, re.I)
+    if m:
+        return m.group(1).strip()
+    return ""
+
+
+def _verse_search(fragment_urdu: str, k: int = 4) -> List[Dict[str, Any]]:
+    """Exact (diacritic-insensitive) lexical lookup of a quoted line in the poetry
+    books. Tries the whole fragment, then the longest 3-word window, so a slightly
+    over-long user quote still matches — but never so loose it matches a different
+    verse (we would rather report 'not found' than substitute)."""
+    if not rag_available():
+        return []
+    frag = _HARAKAT_RE.sub("", fragment_urdu).strip()
+    frag = re.sub(r"\s+", " ", frag)
+    if len(frag) < 4:
+        return []
+    words = frag.split(" ")
+    # candidate needles: full phrase first, then sliding 3-word windows (longest match wins)
+    needles = [frag]
+    if len(words) > 3:
+        needles += [" ".join(words[i:i + 3]) for i in range(len(words) - 2)]
+    try:
+        with db.get_cursor() as cur:
+            for needle in needles:
+                if len(needle) < 5:
+                    continue
+                cur.execute(
+                    f"SELECT title, reference, content, lang, tags[1] AS slug, "
+                    f"tags[2] AS jild_tag, tags[3] AS page_tag, 1.0 AS score "
+                    f"FROM sources WHERE tags && %s AND {_STRIP_SQL} LIKE %s LIMIT %s;",
+                    (list(_POETRY_TAGS), f"%{needle}%", k),
+                )
+                rows = cur.fetchall()
+                if rows:
+                    return [dict(r) for r in rows]
+    except Exception as exc:
+        print(f"RAG verse search failed: {exc}")
+    return []
+
+
+def verse_lookup(user_input: str, fragment: str):
+    """Return (passages, mode) for a verse-recitation request.
+    mode: 'found' (exact line located), 'not_found' (specific line missing → do
+    NOT substitute), or 'general' (no specific line quoted → any relevant verse)."""
+    if fragment:
+        rw = _rewrite_query_to_urdu(fragment) or fragment
+        hits = _verse_search(rw) or _verse_search(fragment)
+        return (hits, "found" if hits else "not_found")
+    # No specific line: semantic search, restricted to poetry books. Only a few —
+    # the model recites ONE she'r, so a wall of 6 near-identical source cards is noise.
+    passages = [p for p in retrieve(user_input) if p.get("slug") in _POETRY_TAGS][:3]
+    if not passages:
+        passages = browse(_POETRY_TAGS, None, k=1)
+    return (passages, "general")
+
+
+_VERSE_GROUNDING_PREFIX = (
+    "PRIVATE BACKGROUND (the user CANNOT see this and must never learn it exists):\n"
+    "The user asked you to RECITE a she'r / kalam. Below are the exact book passages "
+    "to recite from. Strict rules:\n"
+    "- Quote the verse(s) VERBATIM from these passages — copy the Urdu lines exactly as "
+    "printed. NEVER recite, complete, or 'correct' a verse from your own memory, and NEVER "
+    "add a line that is not printed here.\n"
+    "- If the user quoted a specific line, recite THAT she'r (and a little of its context if "
+    "helpful). If they only named a poem/topic, pick a relevant she'r from these passages.\n"
+    "- Give the citation exactly as the reference line states (book, jild, safha). Do not "
+    "invent or change a page number.\n"
+    "- Never mention these passages, 'excerpts', 'sources', or that anything was retrieved.\n\n"
+    "Passages:\n"
+)
+_VERSE_NOT_FOUND_DIRECTIVE = (
+    "PRIVATE BACKGROUND (the user CANNOT see this and must never learn it exists):\n"
+    "The user asked you to recite a SPECIFIC she'r/verse, but an exact search of the poetry "
+    "library did NOT find that line. You MUST NOT recite it from your own memory and MUST NOT "
+    "substitute a DIFFERENT verse as if it were the one requested. Tell the user honestly, in "
+    "their own language/script, that you could not find that particular she'r in the available "
+    "books, and invite them to quote another line of it. Examples:\n"
+    "  • Roman Urdu: Muazrat, yeh makhsoos she'r mujhe dastyab kitabon mein nahi mila.\n"
+    "  • Urdu: معذرت، یہ مخصوص شعر مجھے دستیاب کتابوں میں نہیں ملا۔\n"
+    "  • English: Sorry, I could not find that specific couplet in the available books.\n"
+    "Say nothing beyond this — do not mention search, library, or excerpts.\n\n"
+    "---\nUser's message:\n"
+)
+
+
+def build_verse_input(user_input: str, fragment: str, passages: List[Dict[str, Any]], mode: str) -> str:
+    if mode == "not_found" or not passages:
+        return f"{_VERSE_NOT_FOUND_DIRECTIVE}{user_input}"
+    blocks = []
+    for p in passages:
+        ref = f" — {p['reference']}" if p.get("reference") else ""
+        blocks.append(f"• {p['title']}{ref}\n{p['content']}")
+    ask = (f"The specific line the user is quoting: {fragment!r}. Recite THAT she'r from the "
+           "passages above." if fragment else
+           "The user did not quote a specific line — recite one relevant she'r from the passages.")
+    return (
+        f"{_VERSE_GROUNDING_PREFIX}"
+        + "\n\n".join(blocks)
+        + f"\n\n---\n{ask}\nIf that exact verse is somehow not in the passages above, say you "
+        f"couldn't find that specific she'r rather than reciting a different one.\n"
+        f"Now answer for the user (do not mention the background above):\n{user_input}"
+    )
 
 
 def build_grounded_input(
