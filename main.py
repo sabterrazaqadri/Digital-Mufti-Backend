@@ -512,6 +512,7 @@ BOOK_CATEGORIES = {
     "shaadi-par-mubarakbadi": "fiqh-o-fatawa",
     "tasbeehat-e-ramazan": "fiqh-o-fatawa",
     "tareef-per-inam": "fiqh-o-fatawa",
+    "zia-ul-harmain": "fiqh-o-fatawa",
 
     "ja-al-haq": "aqaid",
     "al-haqq-ul-mubeen": "aqaid",
@@ -532,6 +533,8 @@ BOOK_CATEGORIES = {
     "alahazrat-per-aiterazat-aur-unkay-jawabat": "aqaid",
     "ameer-muaviah-per-aetirazat-kay-jawabat": "aqaid",
     "aasar-e-qayamat": "aqaid",
+    "aainae-deoband": "aqaid",
+    "aadab-e-risalat-ki-qadar-wa-manzilat": "aqaid",
 
     "seerat-e-rasool-e-arabi": "seerat-o-sawaneh",
     "seerat-ul-anbiya": "seerat-o-sawaneh",
@@ -576,6 +579,8 @@ BOOK_CATEGORIES = {
     "shariat-o-tareeqat": "tasawwuf-o-akhlaq",
     "khutbaat-e-razavia": "tasawwuf-o-akhlaq",
     "valentine-day-kia-hay": "tasawwuf-o-akhlaq",
+    "aadab-ul-murshid-wal-mureed": "tasawwuf-o-akhlaq",
+    "200-karamad-naseehatain": "tasawwuf-o-akhlaq",
 
     "nisab-ul-nahw": "darsi-kutub",
     "nisab-us-sarf": "darsi-kutub",
