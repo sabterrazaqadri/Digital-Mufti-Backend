@@ -17,8 +17,11 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+import admin_api
+import autotube
 import database as db
 import rag
+import video_items
 import whatsapp
 from auth import auth_configured, get_current_user_id, get_optional_user_id
 
@@ -246,6 +249,12 @@ async def lifespan(app: FastAPI):
             db.init_db()
         except Exception as exc:  # pragma: no cover
             print(f"DB init failed: {exc}")
+        # Curation/delivery tables for the AutoTube feed. Separate from init_db so a
+        # failure here can never take the Q&A app down with it.
+        try:
+            video_items.init_video_items()
+        except Exception as exc:  # pragma: no cover
+            print(f"Video item store init failed: {exc}")
         if _gemini_configured():
             try:
                 rag.init_rag()
@@ -280,6 +289,13 @@ app.add_middleware(
 
 # WhatsApp routes are always mounted but inert until the Meta credentials exist.
 app.include_router(whatsapp.router)
+
+# AutoTube feed: mounted always, inert until AUTOTUBE_SERVICE_KEY exists. It is a
+# server-to-server API and refuses any request carrying an Origin header, so the
+# CORS middleware above never grants a browser access to it.
+app.include_router(autotube.router)
+# Video-item review queue (admin only; inert until ADMIN_EMAILS/ADMIN_USER_IDS exist).
+app.include_router(admin_api.router)
 
 
 def _encode_sources(passages) -> str:
@@ -468,6 +484,7 @@ BOOK_CATEGORIES = {
     "sirat-ul-jinan": "quran-o-tafseer",
     "surah-e-fatiha-ki-tafseer": "quran-o-tafseer",
     "ilm-ul-quran": "quran-o-tafseer",
+    "ajaaib-ul-quran": "quran-o-tafseer",
 
     "miraat-ul-manajeeh": "hadees",
     "anwaar-ul-hadees": "hadees",
@@ -510,6 +527,11 @@ BOOK_CATEGORIES = {
     "fuzlat-e-rasool-pak-hain": "aqaid",
     "shumool-ul-islam": "aqaid",
     "tableegi-jamat": "aqaid",
+    "amad-e-roohani-aur-milad-e-jismani": "aqaid",
+    "anwaar-ul-mannan": "aqaid",
+    "alahazrat-per-aiterazat-aur-unkay-jawabat": "aqaid",
+    "ameer-muaviah-per-aetirazat-kay-jawabat": "aqaid",
+    "aasar-e-qayamat": "aqaid",
 
     "seerat-e-rasool-e-arabi": "seerat-o-sawaneh",
     "seerat-ul-anbiya": "seerat-o-sawaneh",
@@ -534,6 +556,7 @@ BOOK_CATEGORIES = {
     "fazail-e-syedna-siddiq-e-akbar": "seerat-o-sawaneh",
     "yazeed-kay-ghazi": "seerat-o-sawaneh",
     "yazeedi-lashkarion-ka-anjame-bad": "seerat-o-sawaneh",
+    "asraa-wa-mairaaj": "seerat-o-sawaneh",
 
     "hadaiq-e-bakhshish": "naat-o-manqabat",
     "zoq-e-naat": "naat-o-manqabat",
@@ -546,6 +569,7 @@ BOOK_CATEGORIES = {
     "bayaz-e-paak-hujjat-ul-islam": "naat-o-manqabat",
     "qaseeda-burda-sharif": "naat-o-manqabat",
     "naat-khawani-kay-faiday": "naat-o-manqabat",
+    "annazam-maqbool-fi-adab-e-rasool": "naat-o-manqabat",
 
     "ihya-ul-uloom-mutarjam": "tasawwuf-o-akhlaq",
     "siraat-ul-abrar": "tasawwuf-o-akhlaq",
