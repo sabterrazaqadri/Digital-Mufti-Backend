@@ -7,6 +7,9 @@
 __pycache__/
 *.py[cod]
 
+# Per-window resume state for extract_video_items.py (local run state, not source)
+.extract_checkpoints/
+
 # OS
 .DS_Store
 Thumbs.db

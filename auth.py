@@ -47,8 +47,8 @@ def auth_configured() -> bool:
     return _jwk_client is not None
 
 
-def _verify_token(token: str) -> str:
-    """Verify a Better Auth JWT and return the user id (sub). Raises on failure."""
+def _verify_claims(token: str) -> dict:
+    """Verify a Better Auth JWT and return its claims. Raises on failure."""
     if not _jwk_client:
         raise HTTPException(status_code=503, detail="Authentication not configured")
     try:
@@ -72,10 +72,14 @@ def _verify_token(token: str) -> str:
     if ALLOWED_ISSUERS and claims.get("iss") not in ALLOWED_ISSUERS:
         raise HTTPException(status_code=401, detail="Invalid token: Invalid issuer")
 
-    sub = claims.get("sub")
-    if not sub:
+    if not claims.get("sub"):
         raise HTTPException(status_code=401, detail="Token missing subject")
-    return sub
+    return claims
+
+
+def _verify_token(token: str) -> str:
+    """Verify a Better Auth JWT and return the user id (sub)."""
+    return _verify_claims(token)["sub"]
 
 
 def _extract_bearer(authorization: Optional[str]) -> Optional[str]:
@@ -101,3 +105,65 @@ def get_optional_user_id(authorization: Optional[str] = Header(default=None)) ->
     if not token:
         return None
     return _verify_token(token)
+
+
+# ---------------------------------------------------------------------------
+# Admin
+# ---------------------------------------------------------------------------
+# There is no admin ROLE in Better Auth here, and adding one would mean a schema
+# change to the auth tables. An env allowlist checked on top of the same verified
+# JWT gives the same guarantee with no new auth mechanism: identity still comes
+# only from a signed token, the allowlist just says which identities may curate.
+#
+#   ADMIN_EMAILS    comma-separated, matched against the token's `email` claim
+#   ADMIN_USER_IDS  comma-separated, matched against `sub` (use when the token
+#                   carries no email claim)
+#
+# With NEITHER set, every admin route 503s — an unconfigured allowlist must never
+# mean "everyone is an admin".
+
+def _csv_env(name: str) -> set:
+    return {v.strip().lower() for v in (os.getenv(name) or "").split(",") if v.strip()}
+
+
+def admin_configured() -> bool:
+    return bool(_csv_env("ADMIN_EMAILS") or _csv_env("ADMIN_USER_IDS"))
+
+
+def get_admin_user(authorization: Optional[str] = Header(default=None)) -> str:
+    """Dependency: require a signed-in user who is on the admin allowlist.
+
+    Returns an identifier for the reviewer, stored as `approved_by` so every
+    approval is attributable to a person."""
+    if not admin_configured():
+        raise HTTPException(status_code=503, detail="Admin access not configured")
+    token = _extract_bearer(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    claims = _verify_claims(token)
+
+    email = str(claims.get("email") or "").strip().lower()
+    sub = str(claims.get("sub") or "")
+    if email and email in _csv_env("ADMIN_EMAILS"):
+        return email
+    if sub and sub.lower() in _csv_env("ADMIN_USER_IDS"):
+        return sub
+    raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def whoami(authorization: Optional[str] = Header(default=None)) -> dict:
+    """Verified identity of the caller — used once, to find the value to put in
+    ADMIN_EMAILS/ADMIN_USER_IDS. Returns only the caller's own claims."""
+    token = _extract_bearer(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    claims = _verify_claims(token)
+    return {
+        "user_id": claims.get("sub"),
+        "email": claims.get("email"),
+        "is_admin": bool(
+            (str(claims.get("email") or "").lower() in _csv_env("ADMIN_EMAILS"))
+            or (str(claims.get("sub") or "").lower() in _csv_env("ADMIN_USER_IDS"))
+        ),
+        "admin_configured": admin_configured(),
+    }
